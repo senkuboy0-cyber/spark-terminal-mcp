@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: spark-terminal-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: AUTH_BYPASS
+        value: false
+      - key: JWT_SIGNING_KEY
+        generateValue: true
