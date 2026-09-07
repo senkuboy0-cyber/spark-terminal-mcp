@@ -679,7 +679,7 @@ async def healthz():
     return PlainTextResponse("ok")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD", "POST"])
 async def root():
     return PlainTextResponse(f"{SERVER_NAME} running. MCP: /mcp")
 
