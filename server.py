@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http import StreamableHTTPServerTransport
@@ -646,6 +647,15 @@ elif hasattr(mcp_server, "_request_handlers"):
 # FastAPI app
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title=SERVER_NAME)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 sse_transport = SseServerTransport("/messages/")
 
 
