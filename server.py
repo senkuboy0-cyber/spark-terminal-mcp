@@ -113,7 +113,6 @@ def _base_url(request: Request) -> str:
 mcp_server = Server("spark-terminal")
 
 
-@mcp_server.request_handler(types.ListToolsRequest)
 async def handle_list_tools(request: types.ListToolsRequest) -> types.ListToolsResult:
     return types.ListToolsResult(
         tools=[
@@ -253,7 +252,6 @@ def _run_background(pid: str, command: str) -> None:
         process_status[pid] = "error"
 
 
-@mcp_server.request_handler(types.CallToolRequest)
 async def handle_call_tool(request: types.CallToolRequest) -> types.CallToolResult:
     name = request.params.name
     arguments = request.params.arguments
@@ -634,6 +632,14 @@ async def handle_call_tool(request: types.CallToolRequest) -> types.CallToolResu
 
     except Exception as exc:
         return ok(f"[Error in '{name}']: {exc}")
+
+
+if hasattr(mcp_server, "request_handlers"):
+    mcp_server.request_handlers[types.ListToolsRequest] = handle_list_tools
+    mcp_server.request_handlers[types.CallToolRequest] = handle_call_tool
+elif hasattr(mcp_server, "_request_handlers"):
+    mcp_server._request_handlers[types.ListToolsRequest] = handle_list_tools
+    mcp_server._request_handlers[types.CallToolRequest] = handle_call_tool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
