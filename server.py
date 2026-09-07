@@ -694,7 +694,8 @@ async def download_file(filename: str):
 
 
 @app.get("/.well-known/oauth-protected-resource")
-async def protected_resource_metadata(request: Request):
+@app.get("/.well-known/oauth-protected-resource/{path:path}")
+async def protected_resource_metadata(request: Request, path: str = ""):
     base = _base_url(request)
     return JSONResponse({
         "resource": base,
@@ -705,7 +706,8 @@ async def protected_resource_metadata(request: Request):
 
 
 @app.get("/.well-known/oauth-authorization-server")
-async def as_metadata(request: Request):
+@app.get("/.well-known/oauth-authorization-server/{path:path}")
+async def as_metadata(request: Request, path: str = ""):
     base = _base_url(request)
     return JSONResponse({
         "issuer": base,
