@@ -9,10 +9,9 @@ A complete MCP server with:
   - Optional AUTH_BYPASS=true for local dev
 
 Deploy to Render, paste the URL into:
-  Gemini Spark → Connected Apps → Add a custom app
+  Gemini Spark -> Connected Apps -> Add a custom app
 """
 
-import asyncio
 import base64
 import hashlib
 import hmac
@@ -30,9 +29,7 @@ import threading
 import time
 import uuid
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import psutil
 import requests
@@ -40,15 +37,12 @@ import uvicorn
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 import mcp.types as types
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -63,29 +57,23 @@ TEMP_DIR = "/app/temp"
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# In-memory OAuth stores
-# ─────────────────────────────────────────────────────────────────────────────
-_clients: dict[str, dict] = {}   # client_id -> {client_secret, redirect_uris, ...}
-_codes: dict[str, dict] = {}     # auth_code -> {client_id, redirect_uri, code_challenge, sub}
+_clients: dict[str, dict] = {}
+_codes: dict[str, dict] = {}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Process tracking
-# ─────────────────────────────────────────────────────────────────────────────
 process_buffer: dict[str, list[str]] = {}
 process_status: dict[str, str] = {}
 process_read_index: dict[str, int] = {}
 active_processes: dict[str, subprocess.Popen] = {}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JWT helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
 
 def _b64url_decode(s: str) -> bytes:
     padding = 4 - len(s) % 4
     return base64.urlsafe_b64decode(s + "=" * (padding % 4))
+
 
 def _issue_jwt(sub: str, client_id: str, base_url: str) -> str:
     now = int(time.time())
@@ -98,6 +86,7 @@ def _issue_jwt(sub: str, client_id: str, base_url: str) -> str:
         JWT_SIGNING_KEY.encode(), f"{header}.{payload}".encode(), hashlib.sha256
     ).digest())
     return f"{header}.{payload}.{sig}"
+
 
 def _verify_jwt(token: str, base_url: str) -> dict | None:
     try:
@@ -114,69 +103,66 @@ def _verify_jwt(token: str, base_url: str) -> dict | None:
     except Exception:
         return None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Request base URL
-# ─────────────────────────────────────────────────────────────────────────────
+
 def _base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host", request.headers.get("host", f"localhost:{PORT}"))
     return f"{proto}://{host}"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MCP Server + tools
-# ─────────────────────────────────────────────────────────────────────────────
+
 mcp_server = Server("spark-terminal")
+
 
 @mcp_server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
         types.Tool(name="execute_command",
-            description="Execute any bash shell command and return stdout+stderr. Use for ls, cat, python3, node, compile, etc. Default timeout 60s. For long commands use stream_output.",
-            inputSchema={"type":"object","properties":{"command":{"type":"string","description":"Bash command to run"},"timeout":{"type":"integer","description":"Timeout seconds (default 60)","default":60}},"required":["command"]}),
+            description="Execute any bash shell command and return stdout+stderr.",
+            inputSchema={"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","default":60}},"required":["command"]}),
         types.Tool(name="run_python_code",
-            description="Execute Python 3 code block directly (no file needed). Returns stdout, stderr, exceptions.",
-            inputSchema={"type":"object","properties":{"code":{"type":"string","description":"Python 3 code to execute"}},"required":["code"]}),
+            description="Execute Python 3 code block directly. Returns stdout, stderr, exceptions.",
+            inputSchema={"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}),
         types.Tool(name="stream_output",
-            description="Start a long-running command in background. Returns process_id. Poll with get_process_output until status is finished/error.",
-            inputSchema={"type":"object","properties":{"command":{"type":"string","description":"Bash command to run in background"}},"required":["command"]}),
+            description="Start a long-running command in background. Returns process_id.",
+            inputSchema={"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
         types.Tool(name="get_process_output",
-            description="Get output of a background process started by stream_output. Status: running/finished/error.",
+            description="Get output of a background process. Status: running/finished/error.",
             inputSchema={"type":"object","properties":{"process_id":{"type":"string"},"get_new_only":{"type":"boolean","default":False}},"required":["process_id"]}),
         types.Tool(name="kill_process",
-            description="Kill a process by PID or process_id from stream_output.",
+            description="Kill a process by PID or process_id.",
             inputSchema={"type":"object","properties":{"process_id":{"type":"string"},"force":{"type":"boolean","default":False}},"required":["process_id"]}),
         types.Tool(name="read_file",
-            description="Read contents of any text file. Optionally specify line range.",
+            description="Read contents of any text file.",
             inputSchema={"type":"object","properties":{"file_path":{"type":"string"},"line_start":{"type":"integer"},"line_end":{"type":"integer"}},"required":["file_path"]}),
         types.Tool(name="write_file",
-            description="Create or overwrite a file with given content. Use append=true to add to end.",
+            description="Create or overwrite a file with given content.",
             inputSchema={"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"},"append":{"type":"boolean","default":False}},"required":["file_path","content"]}),
         types.Tool(name="delete_file",
-            description="Delete a file or directory. Use recursive=true for non-empty directories.",
+            description="Delete a file or directory.",
             inputSchema={"type":"object","properties":{"file_path":{"type":"string"},"recursive":{"type":"boolean","default":False}},"required":["file_path"]}),
         types.Tool(name="move_file",
             description="Move or rename a file/directory.",
             inputSchema={"type":"object","properties":{"source_path":{"type":"string"},"destination_path":{"type":"string"}},"required":["source_path","destination_path"]}),
         types.Tool(name="copy_file",
-            description="Copy a file or directory. Use recursive=true for directories.",
+            description="Copy a file or directory.",
             inputSchema={"type":"object","properties":{"source_path":{"type":"string"},"destination_path":{"type":"string"},"recursive":{"type":"boolean","default":False}},"required":["source_path","destination_path"]}),
         types.Tool(name="list_directory",
             description="List directory contents with type, size, permissions.",
             inputSchema={"type":"object","properties":{"directory_path":{"type":"string"},"show_hidden":{"type":"boolean","default":False}},"required":["directory_path"]}),
         types.Tool(name="create_directory",
-            description="Create a new directory (with parents by default).",
+            description="Create a new directory.",
             inputSchema={"type":"object","properties":{"directory_path":{"type":"string"},"parents":{"type":"boolean","default":True}},"required":["directory_path"]}),
         types.Tool(name="fetch_url",
-            description="Fetch webpage content. extract_text=true returns clean text (default). extract_text=false returns raw HTML.",
+            description="Fetch webpage content as clean text or raw HTML.",
             inputSchema={"type":"object","properties":{"url":{"type":"string"},"extract_text":{"type":"boolean","default":True},"timeout":{"type":"integer","default":30}},"required":["url"]}),
         types.Tool(name="download_file_from_url",
             description="Download a file from a URL to /app/downloads.",
             inputSchema={"type":"object","properties":{"url":{"type":"string"},"filename":{"type":"string"}},"required":["url"]}),
         types.Tool(name="search_web",
-            description="Search the web via DuckDuckGo. Returns title, URL, description for each result.",
+            description="Search the web via DuckDuckGo.",
             inputSchema={"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer","default":10}},"required":["query"]}),
         types.Tool(name="http_request",
-            description="Send a custom HTTP request (GET/POST/PUT/DELETE/PATCH) with headers and body.",
+            description="Send a custom HTTP request with headers and body.",
             inputSchema={"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string","enum":["GET","POST","PUT","DELETE","PATCH"],"default":"GET"},"headers":{"type":"object"},"body":{"type":"string"},"timeout":{"type":"integer","default":30}},"required":["url"]}),
         types.Tool(name="install_package",
             description="Install a package via pip, apt, or npm.",
@@ -218,7 +204,7 @@ async def list_tools() -> list[types.Tool]:
             description="Pull latest changes from remote.",
             inputSchema={"type":"object","properties":{"repo_path":{"type":"string","default":"/app"},"remote":{"type":"string","default":"origin"}}}),
         types.Tool(name="compress_files",
-            description="Compress a file/directory into zip or tar.gz. Output saved to /app/downloads.",
+            description="Compress a file/directory into zip or tar.gz.",
             inputSchema={"type":"object","properties":{"source_path":{"type":"string"},"output_filename":{"type":"string"},"format":{"type":"string","enum":["zip","tar.gz"],"default":"zip"}},"required":["source_path","output_filename"]}),
         types.Tool(name="extract_archive",
             description="Extract a zip or tar.gz archive.",
@@ -230,10 +216,10 @@ async def list_tools() -> list[types.Tool]:
             description="Check if a TCP port is open on a host.",
             inputSchema={"type":"object","properties":{"host":{"type":"string"},"port":{"type":"integer"},"timeout":{"type":"integer","default":5}},"required":["host","port"]}),
         types.Tool(name="get_ip_info",
-            description="Get geolocation info for an IP or domain. Leave empty for own public IP.",
+            description="Get geolocation info for an IP or domain.",
             inputSchema={"type":"object","properties":{"ip_or_domain":{"type":"string"}}}),
         types.Tool(name="change_permissions",
-            description="Change file permissions (chmod). Accepts octal (755) or symbolic (+x).",
+            description="Change file permissions (chmod).",
             inputSchema={"type":"object","properties":{"file_path":{"type":"string"},"permissions":{"type":"string"},"recursive":{"type":"boolean","default":False}},"required":["file_path","permissions"]}),
         types.Tool(name="get_env_variable",
             description="Read an environment variable. Leave name empty to list all.",
@@ -249,6 +235,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type":"object","properties":{}}),
     ]
 
+
 def _run_background(pid: str, command: str) -> None:
     try:
         proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
@@ -263,11 +250,14 @@ def _run_background(pid: str, command: str) -> None:
         process_buffer.setdefault(pid, []).append(f"Exception: {exc}")
         process_status[pid] = "error"
 
+
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
     args = arguments or {}
+
     def ok(text: str) -> list[types.TextContent]:
         return [types.TextContent(type="text", text=str(text))]
+
     try:
         if name == "execute_command":
             r = subprocess.run(args["command"], shell=True, capture_output=True, text=True,
@@ -312,7 +302,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 active_processes.pop(pid, None)
                 return ok(f"Process '{pid}' terminated.")
             r = subprocess.run(f"kill {'-9' if force else '-15'} {pid}", shell=True, capture_output=True, text=True)
-            return ok(f"Process {pid} killed." if r.returncode == 0 else f"Failed: {r.stderr.strip()}")
+            return ok(f"Killed." if r.returncode == 0 else f"Failed: {r.stderr.strip()}")
 
         elif name == "read_file":
             fp = args["file_path"]
@@ -389,8 +379,8 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return ok(f"Created: {args['directory_path']}")
 
         elif name == "fetch_url":
-            headers = {"User-Agent": "Mozilla/5.0 (SparkTerminalMCP/1.0)"}
-            resp = requests.get(args["url"], headers=headers, timeout=int(args.get("timeout", 30)))
+            hdrs = {"User-Agent": "Mozilla/5.0 (SparkTerminalMCP/1.0)"}
+            resp = requests.get(args["url"], headers=hdrs, timeout=int(args.get("timeout", 30)))
             resp.raise_for_status()
             if args.get("extract_text", True):
                 soup = BeautifulSoup(resp.text, "lxml")
@@ -415,9 +405,9 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             results = list(DDGS().text(args["query"], max_results=int(args.get("max_results", 10))))
             if not results:
                 return ok("No results found.")
-            lines = [f"Results for: {args['query']}\n" + "="*60]
+            lines = [f"Results for: {args['query']}\n" + "=" * 60]
             for r in results:
-                lines.append(f"Title: {r.get('title','')}\nURL:   {r.get('href','')}\nDesc:  {r.get('body','')}\n" + "-"*50)
+                lines.append(f"Title: {r.get('title','')}\nURL:   {r.get('href','')}\nDesc:  {r.get('body','')}\n" + "-" * 50)
             return ok("\n".join(lines))
 
         elif name == "http_request":
@@ -444,7 +434,14 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             py_v = subprocess.run(["python3", "--version"], capture_output=True, text=True).stdout.strip()
             nd_v = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
             npm_v = subprocess.run(["npm", "--version"], capture_output=True, text=True).stdout.strip()
-            return ok(f"System Info\n{'='*40}\nCPU: {cpu}%\nRAM: {mem.used//1024**2}/{mem.total//1024**2} MB\nDisk: {disk.used//1024**3}/{disk.total//1024**3} GB\nPython: {py_v}\nNode: {nd_v}\nnpm: {npm_v}\nHost: {socket.gethostname()}")
+            return ok(
+                f"System Info\n{'='*40}\n"
+                f"CPU: {cpu}%\n"
+                f"RAM: {mem.used//1024**2}/{mem.total//1024**2} MB\n"
+                f"Disk: {disk.used//1024**3}/{disk.total//1024**3} GB\n"
+                f"Python: {py_v}\nNode: {nd_v}\nnpm: {npm_v}\n"
+                f"Host: {socket.gethostname()}"
+            )
 
         elif name == "list_processes":
             fn = args.get("filter_name", "").lower()
@@ -464,8 +461,10 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return ok(f"Total: {d.total//1024**3}GB  Used: {d.used//1024**3}GB  Free: {d.free//1024**3}GB  ({d.percent}% used)")
 
         elif name == "view_logs":
-            r = subprocess.run(f"tail -n {args.get('lines', 50)} {args.get('log_file', '/var/log/syslog')}",
-                               shell=True, capture_output=True, text=True)
+            r = subprocess.run(
+                f"tail -n {args.get('lines', 50)} {args.get('log_file', '/var/log/syslog')}",
+                shell=True, capture_output=True, text=True
+            )
             return ok(r.stdout or "[Empty]")
 
         elif name == "grep_file":
@@ -501,27 +500,36 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return ok(r.stdout + r.stderr)
 
         elif name == "git_status":
-            r = subprocess.run("git status", shell=True, capture_output=True, text=True, cwd=args.get("repo_path", "/app"))
+            r = subprocess.run("git status", shell=True, capture_output=True, text=True,
+                               cwd=args.get("repo_path", "/app"))
             return ok(r.stdout + r.stderr)
 
         elif name == "git_commit":
             path = args.get("repo_path", "/app")
             add = subprocess.run("git add -A", shell=True, capture_output=True, text=True, cwd=path)
-            commit = subprocess.run(f'git commit -m "{args["message"]}"', shell=True, capture_output=True, text=True, cwd=path)
+            commit = subprocess.run(f'git commit -m "{args["message"]}"',
+                                    shell=True, capture_output=True, text=True, cwd=path)
             return ok(add.stdout + commit.stdout + commit.stderr)
 
         elif name == "git_push":
-            r = subprocess.run(f"git push {args.get('remote','origin')} {args.get('branch','')}".strip(),
-                               shell=True, capture_output=True, text=True, cwd=args.get("repo_path", "/app"), timeout=60)
+            r = subprocess.run(
+                f"git push {args.get('remote','origin')} {args.get('branch','')}".strip(),
+                shell=True, capture_output=True, text=True,
+                cwd=args.get("repo_path", "/app"), timeout=60
+            )
             return ok(r.stdout + r.stderr)
 
         elif name == "git_pull":
-            r = subprocess.run(f"git pull {args.get('remote','origin')}",
-                               shell=True, capture_output=True, text=True, cwd=args.get("repo_path", "/app"), timeout=60)
+            r = subprocess.run(
+                f"git pull {args.get('remote','origin')}",
+                shell=True, capture_output=True, text=True,
+                cwd=args.get("repo_path", "/app"), timeout=60
+            )
             return ok(r.stdout + r.stderr)
 
         elif name == "compress_files":
-            src, out = args["source_path"], os.path.join(DOWNLOADS_DIR, args["output_filename"])
+            src = args["source_path"]
+            out = os.path.join(DOWNLOADS_DIR, args["output_filename"])
             if not os.path.exists(src):
                 return ok(f"Not found: {src}")
             if args.get("format", "zip") == "zip":
@@ -574,13 +582,17 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
 
         elif name == "get_ip_info":
             target = args.get("ip_or_domain", "")
-            resp = requests.get(f"https://ipinfo.io/{target}/json" if target else "https://ipinfo.io/json", timeout=10)
+            resp = requests.get(
+                f"https://ipinfo.io/{target}/json" if target else "https://ipinfo.io/json",
+                timeout=10
+            )
             return ok("\n".join(f"{k}: {v}" for k, v in resp.json().items()))
 
         elif name == "change_permissions":
-            r = subprocess.run(f"chmod {'-R ' if args.get('recursive') else ''}{args['permissions']} '{args['file_path']}'",
+            rec = "-R " if args.get("recursive") else ""
+            r = subprocess.run(f"chmod {rec}{args['permissions']} '{args['file_path']}'",
                                shell=True, capture_output=True, text=True)
-            return ok(f"Done." if r.returncode == 0 else f"Error: {r.stderr.strip()}")
+            return ok("Done." if r.returncode == 0 else f"Error: {r.stderr.strip()}")
 
         elif name == "get_env_variable":
             var = args.get("variable_name")
@@ -597,7 +609,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             fp = os.path.join(DOWNLOADS_DIR, args["filename"])
             if not os.path.exists(fp):
                 return ok(f"File not found in /app/downloads: {args['filename']}")
-            base = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("BASE_URL", "https://your-service.onrender.com"))
+            base = os.environ.get("RENDER_EXTERNAL_URL", "https://spark-terminal-mcp.onrender.com")
             return ok(f"Download URL: {base}/download/{args['filename']}\nSize: {os.path.getsize(fp)} bytes")
 
         elif name == "clear_terminal":
@@ -617,17 +629,14 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
     except Exception as exc:
         return ok(f"[Error in '{name}']: {exc}")
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI app
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title=SERVER_NAME)
-
-# SSE transport (legacy)
 sse_transport = SseServerTransport("/messages/")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bearer auth dependency
-# ─────────────────────────────────────────────────────────────────────────────
+
 async def require_bearer(request: Request):
     if AUTH_BYPASS:
         return {"sub": "dev", "bypass": True}
@@ -636,38 +645,32 @@ async def require_bearer(request: Request):
         raise HTTPException(status_code=401, detail="Missing Bearer token",
                             headers={"WWW-Authenticate": "Bearer"})
     token = auth[7:]
-    base = _base_url(request)
-    claims = _verify_jwt(token, base)
+    claims = _verify_jwt(token, _base_url(request))
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid or expired token",
                             headers={"WWW-Authenticate": "Bearer"})
     return claims
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Health
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/healthz")
 async def healthz():
     return PlainTextResponse("ok")
 
+
 @app.get("/")
 async def root():
-    return PlainTextResponse(f"{SERVER_NAME} is running. MCP endpoint: /mcp")
+    return PlainTextResponse(f"{SERVER_NAME} running. MCP: /mcp")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# File downloads
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/download/{filename:path}")
 async def download_file(filename: str):
-    from fastapi.responses import FileResponse
     fp = os.path.join(DOWNLOADS_DIR, filename)
     if os.path.exists(fp) and os.path.isfile(fp):
-        return FileResponse(fp, headers={"Content-Disposition": f'attachment; filename="{os.path.basename(filename)}"}')  
+        fname = os.path.basename(filename)
+        return FileResponse(fp, headers={"Content-Disposition": 'attachment; filename="' + fname + '"'})
     raise HTTPException(status_code=404, detail="File not found")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RFC 9728 — Protected Resource Metadata
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/.well-known/oauth-protected-resource")
 async def protected_resource_metadata(request: Request):
     base = _base_url(request)
@@ -678,9 +681,7 @@ async def protected_resource_metadata(request: Request):
         "resource_documentation": SERVER_DOC_URI,
     })
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RFC 8414 — Authorization Server Metadata
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/.well-known/oauth-authorization-server")
 async def as_metadata(request: Request):
     base = _base_url(request)
@@ -696,9 +697,7 @@ async def as_metadata(request: Request):
         "service_documentation": SERVER_DOC_URI,
     })
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RFC 7591 — Dynamic Client Registration
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.post("/api/oauth/register")
 async def register_client(request: Request):
     body = await request.json()
@@ -708,9 +707,8 @@ async def register_client(request: Request):
         "client_secret": client_secret,
         "redirect_uris": body.get("redirect_uris", []),
         "client_name": body.get("client_name", "Unknown"),
-        "token_endpoint_auth_method": body.get("token_endpoint_auth_method", "none"),
     }
-    log.info(f"DCR: registered client {client_id} ('{_clients[client_id]['client_name']}')")
+    log.info(f"DCR: registered {client_id}")
     base = _base_url(request)
     return JSONResponse({
         "client_id": client_id,
@@ -724,36 +722,25 @@ async def register_client(request: Request):
         "registration_client_uri": f"{base}/api/oauth/register/{client_id}",
     }, status_code=201)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RFC 7636 — Authorization endpoint (PKCE)
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/authorize")
 async def authorize(request: Request):
     p = dict(request.query_params)
-    client_id = p.get("client_id", "")
-    redirect_uri = p.get("redirect_uri", "")
-    state = p.get("state", "")
-    code_challenge = p.get("code_challenge", "")
-    code_challenge_method = p.get("code_challenge_method", "S256")
-
-    # Auto-approve (demo). In production: show a real login/consent page.
     code = secrets.token_hex(24)
     _codes[code] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method,
+        "client_id": p.get("client_id", ""),
+        "redirect_uri": p.get("redirect_uri", ""),
+        "code_challenge": p.get("code_challenge", ""),
+        "code_challenge_method": p.get("code_challenge_method", "S256"),
         "sub": "spark-user",
         "expires_at": time.time() + 300,
     }
-    log.info(f"Authorize: issued code for client {client_id}")
+    redirect_uri = p.get("redirect_uri", "")
+    state = p.get("state", "")
     sep = "&" if "?" in redirect_uri else "?"
-    location = f"{redirect_uri}{sep}code={code}&state={state}"
-    return RedirectResponse(location, status_code=302)
+    return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}", status_code=302)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RFC 7636 — Token endpoint
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.post("/api/oauth/token")
 async def token_endpoint(request: Request):
     ct = request.headers.get("content-type", "")
@@ -763,29 +750,26 @@ async def token_endpoint(request: Request):
         form = await request.form()
         body = dict(form)
 
-    grant_type = body.get("grant_type", "")
-    if grant_type != "authorization_code":
+    if body.get("grant_type") != "authorization_code":
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
     code = body.get("code", "")
     code_verifier = body.get("code_verifier", "")
     client_id = body.get("client_id", "")
-
     code_data = _codes.get(code)
+
     if not code_data or code_data.get("expires_at", 0) < time.time():
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
     if code_data["client_id"] != client_id:
         return JSONResponse({"error": "invalid_client"}, status_code=400)
 
-    # Verify PKCE S256
     expected = _b64url(hashlib.sha256(code_verifier.encode()).digest())
     if not hmac.compare_digest(expected, code_data.get("code_challenge", "")):
         return JSONResponse({"error": "invalid_grant", "error_description": "PKCE mismatch"}, status_code=400)
 
     del _codes[code]
-    base = _base_url(request)
-    access_token = _issue_jwt(code_data["sub"], client_id, base)
-    log.info(f"Token: issued JWT for sub={code_data['sub']} client={client_id}")
+    access_token = _issue_jwt(code_data["sub"], client_id, _base_url(request))
+    log.info(f"Token issued: sub={code_data['sub']} client={client_id}")
     return JSONResponse({
         "access_token": access_token,
         "token_type": "Bearer",
@@ -793,57 +777,32 @@ async def token_endpoint(request: Request):
         "scope": "mcp",
     })
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MCP endpoint — Streamable HTTP (Gemini Spark) + SSE (legacy)
-# ─────────────────────────────────────────────────────────────────────────────
+
 @app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
-@app.api_route("/", methods=["GET", "POST", "DELETE"])
 async def mcp_endpoint(request: Request, _claims=Depends(require_bearer)):
-    # Streamable HTTP detection: session-id header, DELETE, or non-SSE POST
     session_id = request.headers.get("mcp-session-id", "")
     has_session_param = "sessionid" in {k.lower() for k in request.query_params}
-
-    if session_id or request.method == "DELETE" or (
-        request.method == "POST" and not has_session_param
-    ):
-        # Streamable HTTP transport
+    if session_id or request.method == "DELETE" or (request.method == "POST" and not has_session_param):
         transport = StreamableHTTPServerTransport(mcp_endpoint="/mcp")
         async with transport.connect() as streams:
-            await mcp_server.run(
-                streams[0], streams[1],
-                mcp_server.create_initialization_options(),
-            )
+            await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
         return transport.response(request)
     else:
-        # SSE transport (legacy)
-        async with sse_transport.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await mcp_server.run(
-                streams[0], streams[1],
-                mcp_server.create_initialization_options(),
-            )
+        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
+
 
 @app.post("/messages/")
 async def messages_endpoint(request: Request):
     await sse_transport.handle_post_message(request.scope, request.receive, request._send)
 
+
 @app.get("/sse")
 async def sse_endpoint(request: Request, _claims=Depends(require_bearer)):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await mcp_server.run(
-            streams[0], streams[1],
-            mcp_server.create_initialization_options(),
-        )
+    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+        await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry
-# ─────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    log.info(f"Starting {SERVER_NAME} on port {PORT}")
-    log.info(f"Auth bypass: {AUTH_BYPASS}")
-    log.info(f"MCP endpoint: /mcp")
-    log.info(f"OAuth discovery: /.well-known/oauth-protected-resource")
+    log.info(f"Starting {SERVER_NAME} on :{PORT}  auth_bypass={AUTH_BYPASS}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
