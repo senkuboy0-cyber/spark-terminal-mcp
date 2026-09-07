@@ -805,7 +805,7 @@ async def mcp_endpoint(request: Request, _claims=Depends(require_bearer)):
     session_id = request.headers.get("mcp-session-id", "")
     has_session_param = "sessionid" in {k.lower() for k in request.query_params}
     if session_id or request.method == "DELETE" or (request.method == "POST" and not has_session_param):
-        transport = StreamableHTTPServerTransport(mcp_endpoint="/mcp")
+        transport = StreamableHTTPServerTransport()
         async with transport.connect() as streams:
             await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
         return transport.response(request)
