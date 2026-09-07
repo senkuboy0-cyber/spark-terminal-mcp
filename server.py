@@ -679,8 +679,8 @@ async def healthz():
     return PlainTextResponse("ok")
 
 
-@app.api_route("/", methods=["GET", "HEAD", "POST", "OPTIONS"])
-async def root(request: Request):
+@app.api_route("/", methods=["GET", "HEAD", "POST"])
+async def root():
     return PlainTextResponse(f"{SERVER_NAME} running. MCP: /mcp")
 
 
@@ -694,8 +694,7 @@ async def download_file(filename: str):
 
 
 @app.get("/.well-known/oauth-protected-resource")
-@app.get("/.well-known/oauth-protected-resource/{path:path}")
-async def protected_resource_metadata(request: Request, path: str = ""):
+async def protected_resource_metadata(request: Request):
     base = _base_url(request)
     return JSONResponse({
         "resource": base,
@@ -706,8 +705,7 @@ async def protected_resource_metadata(request: Request, path: str = ""):
 
 
 @app.get("/.well-known/oauth-authorization-server")
-@app.get("/.well-known/oauth-authorization-server/{path:path}")
-async def as_metadata(request: Request, path: str = ""):
+async def as_metadata(request: Request):
     base = _base_url(request)
     return JSONResponse({
         "issuer": base,
@@ -802,18 +800,12 @@ async def token_endpoint(request: Request):
     })
 
 
-@app.api_route("/mcp", methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])
-async def mcp_endpoint(request: Request):
-    if request.method in ("HEAD", "OPTIONS"):
-        return PlainTextResponse("ok")
-        
-    await require_bearer(request)
-    
-    session_id = request.headers.get("mcp-session-id", uuid.uuid4().hex)
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
+async def mcp_endpoint(request: Request, _claims=Depends(require_bearer)):
+    session_id = request.headers.get("mcp-session-id", "")
     has_session_param = "sessionid" in {k.lower() for k in request.query_params}
-    
     if session_id or request.method == "DELETE" or (request.method == "POST" and not has_session_param):
-        transport = StreamableHTTPServerTransport(mcp_session_id=session_id)
+        transport = StreamableHTTPServerTransport(mcp_endpoint="/mcp")
         async with transport.connect() as streams:
             await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
         return transport.response(request)
@@ -822,19 +814,13 @@ async def mcp_endpoint(request: Request):
             await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
 
 
-@app.api_route("/messages/", methods=["POST", "HEAD", "OPTIONS"])
+@app.post("/messages/")
 async def messages_endpoint(request: Request):
-    if request.method in ("HEAD", "OPTIONS"):
-        return PlainTextResponse("ok")
     await sse_transport.handle_post_message(request.scope, request.receive, request._send)
 
 
-@app.api_route("/sse", methods=["GET", "HEAD", "OPTIONS"])
-async def sse_endpoint(request: Request):
-    if request.method in ("HEAD", "OPTIONS"):
-        return PlainTextResponse("ok")
-    
-    await require_bearer(request)
+@app.get("/sse")
+async def sse_endpoint(request: Request, _claims=Depends(require_bearer)):
     async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
         await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
 
