@@ -98,9 +98,20 @@ def change_directory(path: str) -> str:
         return f"Error changing directory: {str(e)}"
 
 def main():
-    """Start the MCP server using standard IO transport"""
+    """Start the MCP server"""
     print("Starting Google Spark Terminal MCP Server...", flush=True)
-    mcp.run(transport="stdio")
+    
+    # Check if running on a cloud service like Render (they provide a PORT environment variable)
+    port = os.environ.get("PORT")
+    
+    if port:
+        print(f"Running on cloud (SSE transport) on port {port}...", flush=True)
+        # Cloud deployments require a web server (SSE) binding to a port
+        mcp.run(transport="sse", host="0.0.0.0", port=int(port))
+    else:
+        print("Running locally (STDIO transport)...", flush=True)
+        # Local deployments use standard input/output
+        mcp.run(transport="stdio")
 
 if __name__ == "__main__":
     main()
