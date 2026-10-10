@@ -9,8 +9,7 @@ from pydantic import BaseModel, Field
 # Initialize FastMCP Server
 mcp = FastMCP(
     "Google Spark Terminal MCP",
-    description="A powerful terminal MCP server for Google Spark to execute commands on the host machine.",
-    version="1.0.0"
+    dependencies=["pydantic", "fastmcp"]
 )
 
 # Request Models
