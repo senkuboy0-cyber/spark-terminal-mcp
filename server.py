@@ -1,126 +1,115 @@
 import asyncio
-import subprocess
 import os
 import platform
-from typing import Optional
-from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+import subprocess
+import sys
+from typing import Optional, Dict, Any
 
-# Initialize FastMCP Server
-mcp = FastMCP(
-    "Google Spark Terminal MCP",
-    dependencies=["pydantic", "fastmcp"]
-)
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent, CallToolRequest
 
-# Request Models
-class CommandRequest(BaseModel):
-    command: str = Field(description="The terminal command to execute")
-    cwd: Optional[str] = Field(None, description="Working directory to run the command in")
+# Create standard MCP Server exactly like the antigravity bridge
+app = Server("spark-terminal")
 
-class SystemInfoResponse(BaseModel):
-    os: str
-    release: str
-    architecture: str
-    current_directory: str
-
-@mcp.tool()
-async def execute_command(command: str, cwd: str = None) -> str:
-    """
-    Execute a terminal command on the host machine and return the output.
-    
-    Args:
-        command (str): The command to run (e.g., 'ls -la', 'dir', 'echo hello').
-        cwd (str, optional): The directory where the command should be executed.
-        
-    Returns:
-        str: The standard output or error message from the command.
-    """
-    try:
-        # Use shell=True for complex commands (pipes, redirects)
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd if cwd else os.getcwd()
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    """List available terminal tools."""
+    return [
+        Tool(
+            name="execute_terminal_command",
+            description="Execute a terminal command on the host machine. Use this to run scripts, manage files, or get system information.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute (e.g., 'dir', 'ls', 'echo hello')"
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Optional: Working directory to run the command in. If not provided, runs in current directory."
+                    }
+                },
+                "required": ["command"]
+            }
+        ),
+        Tool(
+            name="get_system_info",
+            description="Get information about the operating system and current environment.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
         )
+    ]
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Handle tool execution requests."""
+    
+    if name == "execute_terminal_command":
+        command = arguments.get("command")
+        directory = arguments.get("directory", os.getcwd())
         
-        stdout, stderr = await process.communicate()
-        
-        # Decode output
-        out = stdout.decode('utf-8').strip()
-        err = stderr.decode('utf-8').strip()
-        
-        if process.returncode == 0:
-            return out if out else "Command executed successfully with no output."
-        else:
-            return f"Error [{process.returncode}]:\n{err}"
+        if not command:
+            return [TextContent(type="text", text="Error: Command is required")]
             
-    except Exception as e:
-        return f"Failed to execute command: {str(e)}"
-
-@mcp.tool()
-def get_system_info() -> str:
-    """
-    Get information about the host operating system.
-    
-    Returns:
-        str: Basic system information.
-    """
-    info = {
-        "OS": platform.system(),
-        "Release": platform.release(),
-        "Architecture": platform.machine(),
-        "Current Directory": os.getcwd()
-    }
-    
-    result = "System Information:\n"
-    for key, value in info.items():
-        result += f"- {key}: {value}\n"
-    return result
-
-@mcp.tool()
-def change_directory(path: str) -> str:
-    """
-    Change the current working directory of the MCP server.
-    
-    Args:
-        path (str): The path to navigate to.
-        
-    Returns:
-        str: Success or error message.
-    """
-    try:
-        os.chdir(path)
-        return f"Successfully changed directory to: {os.getcwd()}"
-    except FileNotFoundError:
-        return f"Error: Directory not found: {path}"
-    except Exception as e:
-        return f"Error changing directory: {str(e)}"
-
-def main():
-    """Start the MCP server"""
-    print("Starting Google Spark Terminal MCP Server...", flush=True)
-    
-    # Check if running on a cloud service like Render (they provide a PORT environment variable)
-    port = os.environ.get("PORT")
-    
-    if port:
-        print(f"Running on cloud (SSE transport) on port {port}...", flush=True)
-        # Cloud deployments require a web server (SSE) binding to a port
-        # Older versions of FastMCP handle SSE args differently
         try:
-            mcp.run(transport="sse") # For older mcp<2 it typically binds to host/port using uvicorn automatically
+            # Change directory if specified
+            if directory and directory != os.getcwd():
+                try:
+                    os.chdir(directory)
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Failed to change directory to {directory}: {str(e)}")]
+
+            # Create process
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                shell=True
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            out_str = stdout.decode('utf-8', errors='replace').strip()
+            err_str = stderr.decode('utf-8', errors='replace').strip()
+            
+            result = ""
+            if out_str:
+                result += f"Output:\n{out_str}\n"
+            if err_str:
+                result += f"Error:\n{err_str}\n"
+                
+            if not result:
+                result = f"Command executed successfully with return code {process.returncode} (No output)"
+                
+            return [TextContent(type="text", text=result)]
+            
         except Exception as e:
-            print(f"Failed standard SSE startup: {e}")
-            # Fallback for old FastMCP versions 
-            import uvicorn
-            from mcp.server.fastmcp.sse import create_sse_app
-            app = create_sse_app(mcp)
-            uvicorn.run(app, host="0.0.0.0", port=int(port))
+            return [TextContent(type="text", text=f"Failed to execute command: {str(e)}")]
+            
+    elif name == "get_system_info":
+        info = (
+            f"OS: {platform.system()} {platform.release()}\n"
+            f"Architecture: {platform.machine()}\n"
+            f"Current Directory: {os.getcwd()}\n"
+            f"Python Version: {sys.version.split()[0]}"
+        )
+        return [TextContent(type="text", text=info)]
+        
     else:
-        print("Running locally (STDIO transport)...", flush=True)
-        # Local deployments use standard input/output
-        mcp.run(transport="stdio")
+        raise ValueError(f"Unknown tool: {name}")
+
+async def main():
+    """Run the server using stdio transport (required for standard Google Spark local connection)."""
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())
 
 if __name__ == "__main__":
-    main()
+    # Windows event loop policy fix
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    asyncio.run(main())
