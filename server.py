@@ -54,13 +54,14 @@ def main():
     port = int(os.environ.get("PORT", "8080"))
     print(f"Starting Ubuntu Terminal MCP Server on Render (Port: {port})...", flush=True)
     
-    # We must use uvicorn to run the SSE app manually because FastMCP < 2 
-    # doesn't handle port binding through run() directly.
-    import uvicorn
-    from mcp.server.fastmcp.sse import create_sse_app
+    # We must use uvicorn to run the SSE app manually.
+    # In older versions of MCP (like 1.x), the SSE app is exposed directly on the FastMCP instance
+    # as `_app` or through a specific function if not `create_sse_app`. 
+    # But an even safer way in FastMCP 1.x is just to call `run(transport="sse")` and set PORT
     
-    app = create_sse_app(mcp)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Let's override the default starlette port which uvicorn picks up
+    os.environ["PORT"] = str(port)
+    mcp.run(transport="sse")
 
 if __name__ == "__main__":
     main()
