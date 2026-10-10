@@ -1,5 +1,2 @@
-mcp<2
-fastmcp>=0.1.0
-pydantic>=2.0.0
-uvicorn
-sse-starlette
+# No external dependencies required!
+# This uses Python's built-in standard libraries to run the SSE server.
