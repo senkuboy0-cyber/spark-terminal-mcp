@@ -3,113 +3,64 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, CallToolRequest
+# Initialize FastMCP Server
+mcp = FastMCP("Ubuntu Terminal MCP")
 
-# Create standard MCP Server exactly like the antigravity bridge
-app = Server("spark-terminal")
-
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available terminal tools."""
-    return [
-        Tool(
-            name="execute_terminal_command",
-            description="Execute a terminal command on the host machine. Use this to run scripts, manage files, or get system information.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The command to execute (e.g., 'dir', 'ls', 'echo hello')"
-                    },
-                    "directory": {
-                        "type": "string",
-                        "description": "Optional: Working directory to run the command in. If not provided, runs in current directory."
-                    }
-                },
-                "required": ["command"]
-            }
-        ),
-        Tool(
-            name="get_system_info",
-            description="Get information about the operating system and current environment.",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
+@mcp.tool()
+async def execute_command(command: str, cwd: str = None) -> str:
+    """
+    Execute a terminal command on the Render Ubuntu instance.
+    """
+    try:
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd if cwd else os.getcwd()
         )
-    ]
+        
+        stdout, stderr = await process.communicate()
+        out = stdout.decode('utf-8').strip()
+        err = stderr.decode('utf-8').strip()
+        
+        if process.returncode == 0:
+            return out if out else f"Command executed successfully. Exit code: 0"
+        else:
+            return f"Error [{process.returncode}]:\n{err}"
+            
+    except Exception as e:
+        return f"Failed to execute command: {str(e)}"
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool execution requests."""
+@mcp.tool()
+def get_system_info() -> str:
+    """Get information about the Render Ubuntu instance."""
+    info = {
+        "OS": platform.system(),
+        "Release": platform.release(),
+        "Architecture": platform.machine(),
+        "Current Directory": os.getcwd()
+    }
+    result = "System Information:\n"
+    for key, value in info.items():
+        result += f"- {key}: {value}\n"
+    return result
+
+def main():
+    """Start the MCP server using SSE for Render."""
+    port = int(os.environ.get("PORT", "8080"))
+    print(f"Starting Ubuntu Terminal MCP Server on Render (Port: {port})...", flush=True)
     
-    if name == "execute_terminal_command":
-        command = arguments.get("command")
-        directory = arguments.get("directory", os.getcwd())
-        
-        if not command:
-            return [TextContent(type="text", text="Error: Command is required")]
-            
-        try:
-            # Change directory if specified
-            if directory and directory != os.getcwd():
-                try:
-                    os.chdir(directory)
-                except Exception as e:
-                    return [TextContent(type="text", text=f"Failed to change directory to {directory}: {str(e)}")]
-
-            # Create process
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                shell=True
-            )
-            
-            stdout, stderr = await process.communicate()
-            
-            out_str = stdout.decode('utf-8', errors='replace').strip()
-            err_str = stderr.decode('utf-8', errors='replace').strip()
-            
-            result = ""
-            if out_str:
-                result += f"Output:\n{out_str}\n"
-            if err_str:
-                result += f"Error:\n{err_str}\n"
-                
-            if not result:
-                result = f"Command executed successfully with return code {process.returncode} (No output)"
-                
-            return [TextContent(type="text", text=result)]
-            
-        except Exception as e:
-            return [TextContent(type="text", text=f"Failed to execute command: {str(e)}")]
-            
-    elif name == "get_system_info":
-        info = (
-            f"OS: {platform.system()} {platform.release()}\n"
-            f"Architecture: {platform.machine()}\n"
-            f"Current Directory: {os.getcwd()}\n"
-            f"Python Version: {sys.version.split()[0]}"
-        )
-        return [TextContent(type="text", text=info)]
-        
-    else:
-        raise ValueError(f"Unknown tool: {name}")
-
-async def main():
-    """Run the server using stdio transport (required for standard Google Spark local connection)."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+    # We must use uvicorn to run the SSE app manually because FastMCP < 2 
+    # doesn't handle port binding through run() directly.
+    import uvicorn
+    from mcp.server.fastmcp.sse import create_sse_app
+    
+    app = create_sse_app(mcp)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    # Windows event loop policy fix
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    
-    asyncio.run(main())
+    main()
