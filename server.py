@@ -107,7 +107,16 @@ def main():
     if port:
         print(f"Running on cloud (SSE transport) on port {port}...", flush=True)
         # Cloud deployments require a web server (SSE) binding to a port
-        mcp.run(transport="sse", host="0.0.0.0", port=int(port))
+        # Older versions of FastMCP handle SSE args differently
+        try:
+            mcp.run(transport="sse") # For older mcp<2 it typically binds to host/port using uvicorn automatically
+        except Exception as e:
+            print(f"Failed standard SSE startup: {e}")
+            # Fallback for old FastMCP versions 
+            import uvicorn
+            from mcp.server.fastmcp.sse import create_sse_app
+            app = create_sse_app(mcp)
+            uvicorn.run(app, host="0.0.0.0", port=int(port))
     else:
         print("Running locally (STDIO transport)...", flush=True)
         # Local deployments use standard input/output
